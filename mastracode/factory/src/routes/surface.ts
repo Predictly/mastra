@@ -24,6 +24,7 @@ import {
 } from '../session/factory-session.js';
 import type { EnsuredFactorySourceSession } from '../session/factory-session.js';
 import type { LiveSessions } from '../session/live-sessions.js';
+import type { FactorySessionModelResolver } from '../session/phase-model.js';
 import { resolveWorkItemRepository } from '../session/work-item-repository.js';
 import type { StateSigner } from '../state-signing.js';
 import type { AuditEmitter, AuditRecorder } from '../storage/domains/audit/domain.js';
@@ -128,6 +129,8 @@ export interface FactoryApiRoutesDeps {
   /** Work-item feed service, handed to integrations that ingest platform messages. */
   feed: CommentsDomain;
   factoryTransitionService?: FactoryTransitionService;
+  /** The host's per-phase model policy; see `MastraFactoryConfig.resolveSessionModel`. */
+  resolveSessionModel?: FactorySessionModelResolver;
   sessionRetirement?: import('../sandbox/session-retirement.js').SessionRetirementCoordinator;
   onFactoryRuntime?: (runtime: {
     transitionService: FactoryTransitionService;
@@ -389,6 +392,7 @@ export async function prepareFactoryRuleBinding(
       threadTitle: workItemThreadTitle({ source, title: input.item.title, metadata: input.item.metadata }),
       kickoffKey: input.record.id,
       destinationStage,
+      ...(input.sessionModelOverride ? { sessionModelOverride: input.sessionModelOverride } : {}),
       workItem: {
         id: input.item.id,
         role: input.role,
@@ -690,7 +694,11 @@ export function assembleFactoryApiRoutes(deps: FactoryApiRoutesDeps): ApiRoute[]
             sessionId: request.sessionId,
           }),
         deps.domains.intake,
-        { projects: deps.domains.projects, modelDefaults: deps.domains.modelDefaults },
+        {
+          projects: deps.domains.projects,
+          modelDefaults: deps.domains.modelDefaults,
+          ...(deps.resolveSessionModel ? { resolveSessionModel: deps.resolveSessionModel } : {}),
+        },
       )
     : undefined;
   if (transitionService && startCoordinator) {

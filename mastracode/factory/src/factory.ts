@@ -119,6 +119,7 @@ import { observeSessionFirstMessage } from './session/first-message-capture.js';
 import { LiveSessions } from './session/live-sessions.js';
 import { hydrateSessionMemorySettings, layerPersonalMemorySettings } from './session/memory-settings-hydration.js';
 import { hasResolvedOrg } from './session/org-seed.js';
+import type { FactorySessionModelResolver } from './session/phase-model.js';
 import { FactoryReplyCredentialProcessor } from './session/reply-credential-processor.js';
 import { migrateSessionResources } from './session/resource-migration.js';
 import { observeSessionRunEnd } from './session/run-audit.js';
@@ -257,6 +258,18 @@ export interface MastraFactoryConfig {
    * approval cannot bypass that gate.
    */
   disableBuiltinTools?: BuiltinToolId[];
+  /**
+   * Chooses the model and thinking level each phase session runs on, from the
+   * card, its board, phase and role: a stronger model for building, a cheaper
+   * one for triage, or one keyed off the card's labels. Called whenever the
+   * Factory prepares a phase session (a new card, a phase transition, a
+   * restart). Return `undefined`, or leave a field out, to keep the Factory's
+   * defaults. A rule decision's own `model` and `thinking` win over this hook.
+   * Applied only when the run resolves to the Factory's model scope; under the
+   * owner's scope the choice is ignored and logged. A throw falls back to the
+   * defaults with a warning and never fails the run.
+   */
+  resolveSessionModel?: FactorySessionModelResolver;
   /** Background Factory dispatcher configuration. */
   dispatcher?: MastraFactoryDispatcherConfig;
   /**
@@ -1685,6 +1698,7 @@ export class MastraFactory {
             configVersion,
             boardRegistry: this.#boards,
             factoryTransitionService: transitionService,
+            ...(this.#config.resolveSessionModel ? { resolveSessionModel: this.#config.resolveSessionModel } : {}),
             onFactoryRuntime: ({ transitionService: runtimeTransitionService, startCoordinator, prepareBinding }) => {
               this.#startCoordinator = startCoordinator;
               this.#dispatcher ??= new FactoryDecisionDispatcher({

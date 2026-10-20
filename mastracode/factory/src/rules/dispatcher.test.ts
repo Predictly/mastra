@@ -4707,6 +4707,58 @@ describe('FactoryDecisionDispatcher', () => {
     );
   });
 
+  it("hands the decision's model and thinking level to binding preparation", async () => {
+    const storage = (await createFactoryStorageForTests()).workItems;
+    const { item, transitionService } = await queueDecision(storage, {
+      type: 'invokeSkill',
+      role: 'triage',
+      skillName: 'understand-issue',
+      idempotencyKey: 'skill-phase-model',
+      model: 'openai/gpt-5.6',
+      thinking: 'high',
+    });
+    const { controller } = createSession();
+    const prepareBinding = vi.fn(async () => {
+      await storage.prepareRunStart({
+        orgId: 'org-1',
+        userId: 'user-1',
+        factoryProjectId: PROJECT_ID,
+        workItem: {
+          id: item.id,
+          input: {
+            externalSource: item.externalSource,
+            title: item.title,
+            stages: ['intake'],
+            sessions: {},
+            metadata: item.metadata,
+          },
+        },
+        role: 'triage',
+        session: { sessionId: 'session-1', branch: 'factory/issue-1', threadId: 'thread-1' },
+        resourceId: PROJECT_ID,
+        kickoffKey: 'skill-phase-model',
+        kickoffMessage: null,
+      });
+    });
+    const dispatcher = new FactoryDecisionDispatcher({
+      controller: controller as never,
+      isAutoRunEnabled: async () => true,
+      transitionService,
+      storage,
+      ownerId: 'worker-1',
+      prepareBinding,
+    });
+
+    await dispatcher.runOnce(new Date('2030-01-01T00:00:00Z'));
+
+    expect(prepareBinding).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        role: 'triage',
+        sessionModelOverride: { modelId: 'openai/gpt-5.6', thinking: 'high' },
+      }),
+    );
+  });
+
   it('recreates a missing controller session before dispatching to an active binding', async () => {
     const storage = (await createFactoryStorageForTests()).workItems;
     const { item, transitionService } = await queueDecision(storage, {

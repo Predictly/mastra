@@ -470,6 +470,49 @@ describe('hydrateFactorySession', () => {
     }
   });
 
+  it("applies the phase's model ahead of the default and reports it", async () => {
+    const { session, double } = createSessionDouble();
+
+    await expect(
+      hydrateFactorySession(session, {
+        orgId: 'org-1',
+        modelScope: 'factory',
+        ownerUserId: 'user-1',
+        defaultModelId: 'anthropic/claude-opus-5',
+        modelId: 'openai/gpt-5.6',
+      }),
+    ).resolves.toBe('openai/gpt-5.6');
+
+    expect(double.model.switch).toHaveBeenCalledExactlyOnceWith('openai/gpt-5.6');
+    for (const agentType of ['explore', 'plan', 'execute']) {
+      expect(double.subagents.model.set).toHaveBeenCalledWith({ modelId: 'openai/gpt-5.6', agentType });
+    }
+  });
+
+  it("falls back to the default, with a warning, when the phase's model is refused", async () => {
+    const { session, double } = createSessionDouble();
+    double.model.switch.mockRejectedValueOnce(new Error('unknown model'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await expect(
+      hydrateFactorySession(session, {
+        orgId: 'org-1',
+        modelScope: 'factory',
+        ownerUserId: 'user-1',
+        defaultModelId: 'anthropic/claude-opus-5',
+        modelId: 'openai/retired',
+      }),
+    ).resolves.toBe('anthropic/claude-opus-5');
+
+    expect(double.model.switch.mock.calls).toEqual([['openai/retired'], ['anthropic/claude-opus-5']]);
+    expect(double.subagents.model.set).toHaveBeenCalledWith({ modelId: 'anthropic/claude-opus-5', agentType: 'plan' });
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      '[Factory Start] Failed to apply phase model; falling back to the scoped default model',
+      { modelId: 'openai/retired', error: 'unknown model' },
+    );
+    warn.mockRestore();
+  });
+
   it('keeps going but reports no selected model when the default model is unknown', async () => {
     const { session, double } = createSessionDouble();
     double.model.switch.mockRejectedValueOnce(new Error('unknown model'));

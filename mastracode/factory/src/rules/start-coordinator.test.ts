@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createLifecycleTestRegistry } from '../boards/test-utils.js';
 import { DEFAULT_OBSERVATION_THRESHOLD, DEFAULT_REFLECTION_THRESHOLD } from '../session/memory-settings-hydration.js';
+import type { FactorySessionModelResolver } from '../session/phase-model.js';
 import { factoryMemorySettingsUserId } from '../storage/domains/memory-settings/base.js';
 import { createFactoryStorageForTests } from '../storage/test-utils.js';
 import { FactoryStartCoordinator } from './start-coordinator.js';
@@ -741,5 +742,158 @@ describe('FactoryStartCoordinator', () => {
     expect(second.workItemId).not.toBe(first.workItemId);
     expect(await storage.listPendingStarts('org-1', PROJECT_ID)).toHaveLength(1);
     expect(await storage.listPendingStarts('org-2', PROJECT_ID)).toHaveLength(1);
+  });
+});
+
+describe('FactoryStartCoordinator phase session model', () => {
+  async function makeCoordinator(
+    resolveSessionModel: FactorySessionModelResolver | undefined,
+    project?: { modelScope: 'factory' | 'user' | 'hybrid'; defaultModelId: string | null },
+  ) {
+    const seed = await createFactoryStorageForTests();
+    const { controller, session } = makeController();
+    const coordinator = new FactoryStartCoordinator(
+      controller as never,
+      seed.workItems,
+      undefined,
+      makeSourceControl() as never,
+      undefined,
+      {
+        ...(project
+          ? {
+              projects: { getById: vi.fn(async () => ({ orgId: 'org-1', ...project })) } as never,
+              modelDefaults: { get: vi.fn(async () => ({ modelId: 'openai/owner-model' })) } as never,
+            }
+          : {}),
+        resolveSessionModel,
+      },
+    );
+    return { coordinator, session, storage: seed.workItems };
+  }
+
+  it('asks the resolver with the phase context and starts the session on its choice', async () => {
+    const resolveSessionModel = vi.fn(() => ({ modelId: 'openai/gpt-5.6', thinking: 'high' as const }));
+    const { coordinator, session } = await makeCoordinator(resolveSessionModel);
+    const request = startRequest({ defaultModelId: 'anthropic/claude-sonnet-4-6' });
+
+    await coordinator.prepare(request);
+
+    expect(resolveSessionModel).toHaveBeenCalledExactlyOnceWith({
+      orgId: 'org-1',
+      factoryProjectId: PROJECT_ID,
+      board: 'work',
+      phase: 'intake',
+      role: 'work',
+      workItem: request.workItem.input,
+      parentWorkItem: null,
+      defaultModelId: 'anthropic/claude-sonnet-4-6',
+      modelScope: 'factory',
+    });
+    expect(session.model.switch).toHaveBeenCalledExactlyOnceWith('openai/gpt-5.6');
+    expect(session.state.set).toHaveBeenCalledWith(expect.objectContaining({ factoryThinkingLevel: 'high' }));
+  });
+
+  it('hands the resolver the stored card and the card it was opened from', async () => {
+    const seen: Array<{ board: string; phase: string | undefined; parent: string | undefined }> = [];
+    const { coordinator, storage } = await makeCoordinator(({ board, phase, parentWorkItem }) => {
+      seen.push({ board, phase, parent: parentWorkItem?.title });
+      return undefined;
+    });
+    const issue = await storage.upsert({
+      orgId: 'org-1',
+      userId: 'user-1',
+      factoryProjectId: PROJECT_ID,
+      input: { title: 'Fix issue 1', stages: ['execute'], sessions: {}, metadata: {} },
+    });
+    const review = startRequest({ kickoffKey: 'kickoff-review', role: 'review' });
+    review.workItem.input = {
+      ...review.workItem.input,
+      externalSource: { integrationId: 'github', type: 'pull-request', externalId: '2' },
+      title: 'Fix issue 1 (pull request)',
+      parentWorkItemId: issue.item.id,
+    } as typeof review.workItem.input;
+
+    await coordinator.prepare(review);
+    await coordinator.prepare({ ...startRequest({ id: issue.item.id }), destinationStage: undefined });
+
+    expect(seen).toEqual([
+      { board: 'review', phase: 'intake', parent: 'Fix issue 1' },
+      { board: 'work', phase: 'execute', parent: undefined },
+    ]);
+  });
+
+  it("applies the decision's own model and thinking level ahead of the resolver", async () => {
+    const resolveSessionModel = vi.fn(() => ({ modelId: 'openai/gpt-5.6', thinking: 'low' as const }));
+    const { coordinator, session } = await makeCoordinator(resolveSessionModel);
+
+    await coordinator.prepare({
+      ...startRequest({ defaultModelId: 'anthropic/claude-sonnet-4-6' }),
+      sessionModelOverride: { modelId: 'anthropic/claude-opus-4-7', thinking: 'high' },
+    });
+
+    expect(resolveSessionModel).not.toHaveBeenCalled();
+    expect(session.model.switch).toHaveBeenCalledExactlyOnceWith('anthropic/claude-opus-4-7');
+    expect(session.state.set).toHaveBeenCalledWith(expect.objectContaining({ factoryThinkingLevel: 'high' }));
+  });
+
+  it('keeps the project default, with a warning, when the resolver throws', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { coordinator, session } = await makeCoordinator(async () => {
+      throw new Error('policy table unavailable');
+    });
+
+    await expect(
+      coordinator.prepare(startRequest({ defaultModelId: 'anthropic/claude-sonnet-4-6' })),
+    ).resolves.toMatchObject({ kickoffStatus: 'sent' });
+
+    expect(session.model.switch).toHaveBeenCalledExactlyOnceWith('anthropic/claude-sonnet-4-6');
+    expect(session.state.set).toHaveBeenCalledWith(expect.objectContaining({ factoryThinkingLevel: undefined }));
+    expect(warn).toHaveBeenCalledWith(
+      '[Factory Start] Session model resolver failed; using the Factory defaults',
+      expect.objectContaining({ role: 'work', error: 'policy table unavailable' }),
+    );
+    warn.mockRestore();
+  });
+
+  it("ignores the resolver and the decision when the run uses the session owner's scope", async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const resolveSessionModel = vi.fn(() => ({ modelId: 'openai/gpt-5.6', thinking: 'high' as const }));
+    const { coordinator, session } = await makeCoordinator(resolveSessionModel, {
+      modelScope: 'user',
+      defaultModelId: 'anthropic/factory-model',
+    });
+
+    await coordinator.prepare({
+      ...startRequest(),
+      sessionModelOverride: { modelId: 'anthropic/claude-opus-4-7', thinking: 'low' },
+    });
+
+    expect(resolveSessionModel).not.toHaveBeenCalled();
+    expect(session.model.switch).toHaveBeenCalledExactlyOnceWith('openai/owner-model');
+    expect(session.state.set).toHaveBeenCalledWith(
+      expect.objectContaining({ factoryModelScope: 'user', factoryThinkingLevel: undefined }),
+    );
+    expect(info).toHaveBeenCalledWith(
+      "[Factory Start] Phase model choice ignored: the run uses the session owner's model scope",
+      expect.objectContaining({ role: 'work' }),
+    );
+    info.mockRestore();
+  });
+
+  it("falls back to the project default when the session refuses the phase's model", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { coordinator, session } = await makeCoordinator(() => ({ modelId: 'google/retired-model' }));
+    session.model.switch.mockRejectedValueOnce(new Error('Unknown model'));
+
+    await expect(
+      coordinator.prepare(startRequest({ defaultModelId: 'anthropic/claude-sonnet-4-6' })),
+    ).resolves.toMatchObject({ kickoffStatus: 'sent' });
+
+    expect(session.model.switch.mock.calls).toEqual([['google/retired-model'], ['anthropic/claude-sonnet-4-6']]);
+    expect(warn).toHaveBeenCalledWith(
+      '[Factory Start] Failed to apply phase model; falling back to the scoped default model',
+      { modelId: 'google/retired-model', error: 'Unknown model' },
+    );
+    warn.mockRestore();
   });
 });

@@ -1,3 +1,5 @@
+import { THINKING_LEVEL_VALUES } from '@mastra/code-sdk/thinking';
+
 import type { BoardRegistry } from '../boards/registry.js';
 import type {
   FactoryCommitDecision,
@@ -18,6 +20,7 @@ const MAX_ARGUMENTS_LENGTH = 4_096;
 export const MAX_ROLE_LENGTH = 32;
 export const MAX_TOOL_NAME_LENGTH = 128;
 const MAX_SKILL_NAME_LENGTH = 128;
+const MAX_MODEL_ID_LENGTH = 200;
 const MAX_SOURCE_KEY_LENGTH = 256;
 const MAX_URL_LENGTH = 2_048;
 const MAX_METADATA_JSON_LENGTH = 16_384;
@@ -28,6 +31,8 @@ export const MAX_BOARD_IDENTIFIER_LENGTH = 128;
 export const IDENTIFIER_RE = /^[a-z0-9][a-z0-9_-]*$/i;
 export const BOARD_IDENTIFIER_RE = IDENTIFIER_RE;
 const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+// A model id is opaque to the Factory; it is kept to one token so no prose can ride in it.
+const MODEL_ID_RE = /^\S+$/;
 const SENSITIVE_KEY_RE = /(?:authorization|cookie|credential|password|secret|token)/i;
 const WORK_ITEM_SOURCES: readonly WorkItemSource[] = [
   'github-issue',
@@ -291,6 +296,8 @@ export function validateFactoryRuleDecision(value: unknown, causalDepth = 0): Fa
           'precedingMessage',
           'cancelInFlight',
           'resume',
+          'model',
+          'thinking',
         ],
         'Factory invoke skill decision',
       );
@@ -317,6 +324,15 @@ export function validateFactoryRuleDecision(value: unknown, causalDepth = 0): Fa
       if (value.resume === true && value.skillName === undefined) {
         throw new FactoryRuleValidationError('Factory skill resume requires skillName.');
       }
+      const model =
+        value.model === undefined
+          ? undefined
+          : boundedString(value.model, 'Factory skill model', MAX_MODEL_ID_LENGTH, MODEL_ID_RE);
+      // Unsupported levels are refused here, not quietly mapped at run time.
+      const thinking =
+        value.thinking === undefined
+          ? undefined
+          : enumValue(value.thinking, THINKING_LEVEL_VALUES, 'Factory skill thinking level');
       return {
         type,
         ...commonCommitFields(value),
@@ -330,6 +346,8 @@ export function validateFactoryRuleDecision(value: unknown, causalDepth = 0): Fa
         ...(args ? { arguments: args } : {}),
         ...(precedingMessage ? { precedingMessage } : {}),
         ...(value.cancelInFlight === true ? { cancelInFlight: true } : {}),
+        ...(model ? { model } : {}),
+        ...(thinking ? { thinking } : {}),
       };
     }
     case 'sendMessage': {

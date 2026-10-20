@@ -318,6 +318,32 @@ phases: {
 
 **Remaining limitations:** Throughput and lead-time metrics still count completions by Work's `done` phase. `factory-ui` still renders the built-in stage and role pipeline. Built-in board replacement and customization remain unsupported.
 
+### Session model and thinking level per phase
+
+By default every phase session runs on the Factory project's default model and thinking level. Two optional settings choose them per phase instead; nothing changes for a Factory that sets neither.
+
+`resolveSessionModel` on `MastraFactoryConfig` is the project-wide policy. The Factory calls it each time it prepares a phase session (a new card, a phase transition, a restart) with the card's `board`, the `phase` and `role` it is prepared for, the card itself (`workItem`; source-tracked cards carry their labels in `metadata.labels`), the card it was opened from (`parentWorkItem`, such as the issue behind a pull request the Factory opened), the project's `defaultModelId`, and the run's `modelScope`. Return a model id, a thinking level, both, or `undefined` to keep the defaults.
+
+```typescript
+new MastraFactory({
+  storage,
+  resolveSessionModel: ({ role, workItem }) => {
+    const labels = Array.isArray(workItem.metadata?.labels) ? workItem.metadata.labels : [];
+    if (role === 'triage' || role === 'review') return { modelId: 'anthropic/claude-haiku-4-5', thinking: 'low' };
+    if (role === 'work' && labels.includes('effort:high')) return { modelId: 'openai/gpt-5.6', thinking: 'high' };
+    return undefined;
+  },
+});
+```
+
+A board rule's `invokeSkill` decision can carry `model` and `thinking` for the one run it starts, which is the exception to that policy:
+
+```typescript
+{ type: 'invokeSkill', idempotencyKey, role: 'work', skillName: 'factory-build', model: 'openai/gpt-5.6', thinking: 'high' }
+```
+
+Precedence is decision, then `resolveSessionModel`, then the project default, field by field. A choice is applied only when the run resolves to the Factory's model scope (`factory`, or the run half of `hybrid`); under the owner's scope it is ignored with a log line, since it could name a model the owner holds no credentials for. A resolver that throws, a model the session refuses, or a thinking level the chosen model cannot run at falls back to the defaults with a warning and never fails the run. Validation rejects a `thinking` value that is not a thinking level. The thinking level is stamped on the session when its binding is prepared, below a level a person sets on the session with `/think` and above the Factory's stored default; a person can still switch a running session's model by hand. A decision dispatched to a role whose session is already prepared keeps that session's model.
+
 ### Execute a custom board
 
 Installed custom boards can create linked items, start working roles, transition through bound tools, and react to completed tool results. Board and phase identifiers contain 1–128 letters, digits, underscores, or hyphens and start with a letter or digit. Identifiers are case-sensitive and cannot contain surrounding whitespace.
@@ -406,7 +432,7 @@ export function createFactory(config: Omit<MastraFactoryConfig, 'boards' | 'incl
 }
 ```
 
-Use the host's normal `prepare()`, `new Mastra(...)`, and `finalize()` sequence. Change the hardcoded `includeDefaultBoards: true` in `createFactory` to `false` to run without Work or Review. Working roles name bindings on the shared Code Agent; they do not register separate agents. Factory has no per-role agent configuration option. The board's kickoff prompts supply the role-specific instructions.
+Use the host's normal `prepare()`, `new Mastra(...)`, and `finalize()` sequence. Change the hardcoded `includeDefaultBoards: true` in `createFactory` to `false` to run without Work or Review. Working roles name bindings on the shared Code Agent; they do not register separate agents. The board's kickoff prompts supply the role-specific instructions; `resolveSessionModel` or a decision's `model` and `thinking` choose each role's model (see [Session model and thinking level per phase](#session-model-and-thinking-level-per-phase)).
 
 Create a card with `POST /web/factory/projects/:id/work-items`, passing `board: 'release'`, a title, and the GitHub issue's `externalSource`. The card starts in `queued`. Then use `POST /web/factory/projects/:id/work-items/:workItemId/transition` with `board: 'release'`, `stage: 'preparing'`, the returned `expectedRevision`, a unique `requestId`, and a `cause`. Send these requests as an authorized user using the host's authentication. The human transition satisfies this board's policy and starts the preparer. Its bound tool advances to `shipping`; the publisher's completed check produces a deferred transition to `shipped`. Terminal entry revokes the binding and releases the sandbox. The Factory UI performs the same operations against installed boards (see below); verify the persisted card's board, phase, and deferred decision status either way.
 

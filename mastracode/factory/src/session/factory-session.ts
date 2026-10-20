@@ -315,10 +315,17 @@ export interface HydrateFactorySessionArgs {
    * provider is applied when the SDK mode default has no credential, else the mode default.
    */
   defaultModelId?: string;
+  /**
+   * The model the phase chose for this session (a rule decision's `model`, or
+   * `resolveSessionModel`). Applied ahead of `defaultModelId`, which stays the
+   * fallback when this one is refused.
+   */
+  modelId?: string;
 }
 
 /**
- * Apply a factory project's main model to a session on every run.
+ * Apply the phase's model, else the factory project's main model, to a session
+ * on every run.
  *
  * The model switch is best-effort. A retired model id must not sink a run that
  * is otherwise ready, and the reason is logged. Observational-memory settings are resolved from the
@@ -350,32 +357,40 @@ export async function hydrateFactorySession(
     });
     selectedModelId = providerModelId ?? modeModelId;
   }
-  if (!selectedModelId) return undefined;
+  // The phase's own model first; the scoped default stays the fallback when it is refused.
+  const candidates = [...new Set([args.modelId, selectedModelId])].filter((id): id is string => Boolean(id));
+  if (candidates.length === 0) return undefined;
 
-  let switched = true;
-  try {
-    await session.model.switch(selectedModelId);
-  } catch (error) {
-    switched = false;
-    console.warn('[Factory Start] Failed to apply scoped default model', {
-      modelId: selectedModelId,
-      error: error instanceof Error ? error.message : String(error),
-    });
+  let switched: string | undefined;
+  for (const modelId of candidates) {
+    try {
+      await session.model.switch(modelId);
+      switched = modelId;
+      break;
+    } catch (error) {
+      console.warn(
+        modelId === selectedModelId
+          ? '[Factory Start] Failed to apply scoped default model'
+          : '[Factory Start] Failed to apply phase model; falling back to the scoped default model',
+        { modelId, error: error instanceof Error ? error.message : String(error) },
+      );
+    }
   }
+  const subagentModelId = switched ?? candidates.at(-1)!;
   // Subagents otherwise keep the server-wide settings (or the SDK's built-in
   // default), which may name a provider this factory has no credentials for.
   // Each role is independent, so one failure doesn't strand the others.
   for (const agentType of ['explore', 'plan', 'execute']) {
     try {
-      await session.subagents.model.set({ modelId: selectedModelId, agentType });
+      await session.subagents.model.set({ modelId: subagentModelId, agentType });
     } catch (error) {
       console.warn('[Factory Start] Failed to apply scoped default subagent model', {
         agentType,
-        modelId: selectedModelId,
+        modelId: subagentModelId,
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
   // Callers pin this id to the thread, so only report a model the session actually runs on.
-  return switched ? selectedModelId : undefined;
+  return switched;
 }

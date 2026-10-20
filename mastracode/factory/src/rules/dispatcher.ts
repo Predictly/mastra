@@ -11,6 +11,7 @@ import {
 } from '../boards/index.js';
 import type { BoardRegistry } from '../boards/index.js';
 import { moveCardToBoard } from '../boards/relocate.js';
+import type { FactorySessionModelChoice } from '../session/phase-model.js';
 import {
   FACTORY_OPEN_RUN_STALE_MS,
   heartbeatSessionOpenRun,
@@ -359,10 +360,23 @@ function factoryRequestContext(input: {
   return requestContext;
 }
 
+/** The model and thinking level a decision chose for the session it starts, or nothing. */
+function decisionSessionModel(
+  decision: Extract<FactoryCommitDecision, { type: 'invokeSkill' }>,
+): FactorySessionModelChoice | undefined {
+  if (!decision.model && !decision.thinking) return undefined;
+  return {
+    ...(decision.model ? { modelId: decision.model } : {}),
+    ...(decision.thinking ? { thinking: decision.thinking } : {}),
+  };
+}
+
 export interface FactoryBindingPreparationInput {
   record: FactoryDeferredDecisionRecord;
   item: WorkItemRow;
   role: string;
+  /** The decision's own model and thinking level for the session it prepares; see `FactoryInvokeSkillDecision`. */
+  sessionModelOverride?: FactorySessionModelChoice;
 }
 
 export interface FactoryDecisionDispatcherOptions {
@@ -979,7 +993,7 @@ export class FactoryDecisionDispatcher {
         ) {
           throw new FactoryDecisionSuperseded();
         }
-        const binding = await this.#requireOrPrepareBinding(record, decision.role);
+        const binding = await this.#requireOrPrepareBinding(record, decision.role, decisionSessionModel(decision));
         await this.#withBindingSkillRun(binding.id, async () => {
           const item = record.workItemId
             ? await this.#storage.get({ orgId: record.orgId, id: record.workItemId })
@@ -1539,6 +1553,7 @@ export class FactoryDecisionDispatcher {
   async #requireOrPrepareBinding(
     record: FactoryDeferredDecisionRecord,
     role: string,
+    sessionModelOverride?: FactorySessionModelChoice,
   ): Promise<FactoryRunBindingRecord> {
     const binding = await this.#findBinding(record, role);
     if (binding) {
@@ -1552,7 +1567,7 @@ export class FactoryDecisionDispatcher {
       );
     }
     const item = await this.#requireItem(record);
-    await this.#prepareBinding({ record, item, role });
+    await this.#prepareBinding({ record, item, role, ...(sessionModelOverride ? { sessionModelOverride } : {}) });
     return this.#requireBinding(record, role);
   }
 

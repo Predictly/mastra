@@ -13,6 +13,7 @@ import type {
 
 import { boardForWorkItem, resolveBoardToolRule, workItemPhaseSemantics } from '../boards/index.js';
 import type { BoardRegistry } from '../boards/index.js';
+import { phaseThinkingLevel } from '../session/thinking-default.js';
 import type { FactoryRunBindingRecord, WorkItemsStorage, WorkItemRow } from '../storage/domains/work-items/base.js';
 import { findSessionRunBinding, getFactorySessionCoordinates } from './binding-context.js';
 import type { FactoryTransitionService } from './transition-service.js';
@@ -108,7 +109,11 @@ function reviewRuntimeFromRequestContext(
   }
   return {
     modelId,
-    thinkingLevel: resolveRequestThinkingLevel({ state: context?.state }, undefined, factoryThinkingLevel),
+    thinkingLevel: resolveRequestThinkingLevel(
+      { state: context?.state },
+      undefined,
+      phaseThinkingLevel(context?.state) ?? factoryThinkingLevel,
+    ),
   };
 }
 

@@ -54,6 +54,12 @@ export interface MastraCodeState {
    * marker a projectless factory session is indistinguishable from a local one.
    */
   factoryOrgUnresolved?: boolean;
+  /**
+   * The thinking level the Factory chose for the phase a run binding was
+   * prepared for. Read below a session's own `thinkingLevel` and above the
+   * Factory's stored default; absent when no phase policy chose one.
+   */
+  factoryThinkingLevel?: ThinkingLevelSetting;
   /** Linked repository used by this session when source-control execution is required. */
   projectRepositoryId?: string;
   /** Active feature branch checked out in the session workdir. */
@@ -190,6 +196,7 @@ export const stateSchema = z
     factoryOwnerUserId: z.string().optional(),
     factoryOrgId: z.string().optional(),
     factoryOrgUnresolved: z.boolean().optional(),
+    factoryThinkingLevel: z.enum(THINKING_LEVEL_VALUES).optional(),
     projectRepositoryId: z.string().optional(),
     branch: z.string().optional(),
     // Session operates on an untrusted checkout — suppress AGENTS.md ingestion.

@@ -5,12 +5,19 @@ import { RequestContext } from '@mastra/core/request-context';
 import { boardForWorkItem } from '../boards/index.js';
 import { primeTenantCredentialsForTenant } from '../routes/tenant-credentials.js';
 import { hydrateFactorySession, resolveFactorySessionModel } from '../session/factory-session.js';
+import { resolvePhaseSessionModel } from '../session/phase-model.js';
+import type {
+  FactorySessionModelChoice,
+  FactorySessionModelResolver,
+  ResolvedPhaseSessionModel,
+} from '../session/phase-model.js';
 import { resolveWorkItemRepository } from '../session/work-item-repository.js';
 import type { IntakeStorage } from '../storage/domains/intake/base.js';
 import type { ModelDefaultsStorage } from '../storage/domains/model-defaults/base.js';
 import type { EffectiveModelScope, FactoryProjectsStorage } from '../storage/domains/projects/base.js';
 import type { SourceControlSession, SourceControlStorageHandle } from '../storage/domains/source-control/base.js';
-import type { CreateWorkItemInput, WorkItemsStorage } from '../storage/domains/work-items/base.js';
+import type { CreateWorkItemInput, WorkItemRow, WorkItemsStorage } from '../storage/domains/work-items/base.js';
+import { currentStage } from './transition-service.js';
 import type { FactoryTransitionService } from './transition-service.js';
 import { externallyAuthoredWorkItem } from './types.js';
 import type { FactoryRuleStage, FactoryTransitionResult } from './types.js';
@@ -27,6 +34,11 @@ export interface FactoryStartRequest {
   /** The run's effective scope; a hybrid Factory's runs use the Factory's model and credentials. */
   modelScope: EffectiveModelScope;
   defaultModelId?: string;
+  /**
+   * The model and thinking level the rule decision chose for this run, ahead of
+   * `resolveSessionModel` and the project default. Applied under the `factory` scope only.
+   */
+  sessionModelOverride?: FactorySessionModelChoice;
   workItem: {
     id?: string;
     role: string;
@@ -139,6 +151,7 @@ export class FactoryStartCoordinator {
   readonly #intake?: IntakeStorage;
   readonly #projects?: FactoryProjectsStorage;
   readonly #modelDefaults?: ModelDefaultsStorage;
+  readonly #resolveSessionModel?: FactorySessionModelResolver;
 
   constructor(
     controller: FactoryController,
@@ -150,7 +163,12 @@ export class FactoryStartCoordinator {
           request: FactoryStartRequest,
         ) => SourceControlStorageHandle | undefined | Promise<SourceControlStorageHandle | undefined>),
     intake?: IntakeStorage,
-    sessionModel?: { projects: FactoryProjectsStorage; modelDefaults: ModelDefaultsStorage },
+    sessionModel?: {
+      projects?: FactoryProjectsStorage;
+      modelDefaults?: ModelDefaultsStorage;
+      /** The host's per-phase model policy; see `MastraFactoryConfig.resolveSessionModel`. */
+      resolveSessionModel?: FactorySessionModelResolver;
+    },
   ) {
     this.#controller = controller;
     this.#storage = storage;
@@ -159,6 +177,52 @@ export class FactoryStartCoordinator {
     this.#intake = intake;
     this.#projects = sessionModel?.projects;
     this.#modelDefaults = sessionModel?.modelDefaults;
+    this.#resolveSessionModel = sessionModel?.resolveSessionModel;
+  }
+
+  /**
+   * The model and thinking level this preparation runs on beyond the scoped
+   * default: the decision's own choice, then the host's `resolveSessionModel`.
+   */
+  async #phaseSessionModel(
+    request: FactoryStartRequest,
+    sessionModel: { modelScope: EffectiveModelScope; modelId?: string },
+    storedItem: WorkItemRow | null,
+  ): Promise<ResolvedPhaseSessionModel> {
+    const decision = request.sessionModelOverride;
+    if (!this.#resolveSessionModel && !decision) return { modelId: undefined, thinking: undefined };
+    const input = request.workItem.input;
+    const parentWorkItemId = storedItem?.parentWorkItemId ?? input.parentWorkItemId ?? null;
+    let parentWorkItem: WorkItemRow | null = null;
+    if (this.#resolveSessionModel && parentWorkItemId) {
+      try {
+        parentWorkItem = await this.#storage.get({ orgId: request.orgId, id: parentWorkItemId });
+      } catch (error) {
+        // The resolver still runs; it just sees no parent.
+        console.warn('[Factory Start] Could not load the parent work item for the session model resolver', {
+          parentWorkItemId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return resolvePhaseSessionModel({
+      context: {
+        orgId: request.orgId,
+        factoryProjectId: request.factoryProjectId,
+        board: boardForWorkItem({
+          board: storedItem?.board ?? input.board ?? null,
+          externalSource: storedItem?.externalSource ?? input.externalSource ?? null,
+        }),
+        phase: request.destinationStage ?? currentStage(storedItem?.stages ?? input.stages ?? []),
+        role: request.workItem.role,
+        workItem: storedItem ?? input,
+        parentWorkItem,
+        defaultModelId: sessionModel.modelId,
+        modelScope: sessionModel.modelScope,
+      },
+      decision,
+      resolver: this.#resolveSessionModel,
+    });
   }
 
   async prepare(request: FactoryStartRequest): Promise<FactoryStartPreparedResult> {
@@ -181,6 +245,7 @@ export class FactoryStartCoordinator {
     const storedItem = request.workItem.id
       ? await storage.get({ orgId: request.orgId, id: request.workItem.id })
       : null;
+    const phaseModel = await this.#phaseSessionModel(request, sessionModel, storedItem);
     const intakeConfig = await this.#intake?.getConfig({ orgId: request.orgId, integrationIds: ['linear'] });
     let repository = await resolveWorkItemRepository({
       sourceControl,
@@ -294,6 +359,8 @@ export class FactoryStartCoordinator {
       factoryOrgId: request.orgId,
       factoryModelScope: sessionModel.modelScope,
       factoryOwnerUserId: sourceSession.userId,
+      // The phase's thinking level, re-stamped on every preparation; absent means the Factory default.
+      factoryThinkingLevel: phaseModel.thinking,
       pluginInstructions: [
         ...existingPluginInstructions.filter(instruction => instruction !== targetRepositoryInstruction),
         targetRepositoryInstruction,
@@ -305,13 +372,14 @@ export class FactoryStartCoordinator {
       userId: sourceSession.userId,
       credentialScope: sessionModel.modelScope,
     });
-    // Apply the factory's main model before any model-dependent run work.
+    // Apply the phase's model, else the factory's main model, before any model-dependent run work.
     // Observational-memory settings are loaded per invocation by the input processor.
     await hydrateFactorySession(session, {
       orgId: request.orgId,
       modelScope: sessionModel.modelScope,
       ownerUserId: sourceSession.userId,
       defaultModelId: sessionModel.modelId,
+      modelId: phaseModel.modelId,
     });
     // The tool is `requireApproval`, and that prompt parks the run whether or not
     // someone pressed Start — a person is reading the plan, not an approval queue.

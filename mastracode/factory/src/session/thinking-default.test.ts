@@ -47,6 +47,29 @@ describe('resolveFactoryThinkingLevel', () => {
     expect(level).toBe('high');
   });
 
+  it('prefers the level the Factory chose for the session phase over the stored default', async () => {
+    const level = await resolveFactoryThinkingLevel(
+      contextFor({
+        sessionId: 'session-2',
+        resourceId: 'user-1',
+        getState: () => ({ factoryProjectId: FACTORY_ID, factoryThinkingLevel: 'low' }),
+      }),
+      deps(),
+    );
+    expect(level).toBe('low');
+    // A value that is not a thinking level is ignored, not passed through.
+    expect(
+      await resolveFactoryThinkingLevel(
+        contextFor({
+          sessionId: 'session-2',
+          resourceId: 'user-1',
+          getState: () => ({ factoryProjectId: FACTORY_ID, factoryThinkingLevel: 'ultra' }),
+        }),
+        deps(),
+      ),
+    ).toBe('high');
+  });
+
   it('resolves Factory-page requests by their resource id', async () => {
     expect(
       await resolveFactoryThinkingLevel(contextFor({ sessionId: FACTORY_ID, resourceId: FACTORY_ID }), deps()),

@@ -453,6 +453,47 @@ describe('Factory rule validation', () => {
     ).toThrow(/resume requires skillName/i);
   });
 
+  it('accepts a model and thinking level on invokeSkill decisions', () => {
+    expect(
+      validateFactoryRuleDecision({
+        type: 'invokeSkill',
+        idempotencyKey: 'skill-9',
+        role: 'work',
+        skillName: 'factory-build',
+        model: ' openai/gpt-5.6 ',
+        thinking: 'high',
+      }),
+    ).toEqual({
+      type: 'invokeSkill',
+      idempotencyKey: 'skill-9',
+      role: 'work',
+      skillName: 'factory-build',
+      model: 'openai/gpt-5.6',
+      thinking: 'high',
+    });
+  });
+
+  it('rejects a thinking level the SDK does not know and a model id that is not one token', () => {
+    expect(() =>
+      validateFactoryRuleDecision({
+        type: 'invokeSkill',
+        idempotencyKey: 'skill-10',
+        role: 'work',
+        skillName: 'factory-build',
+        thinking: 'ultra',
+      }),
+    ).toThrow(/thinking level is invalid/i);
+    expect(() =>
+      validateFactoryRuleDecision({
+        type: 'invokeSkill',
+        idempotencyKey: 'skill-11',
+        role: 'work',
+        skillName: 'factory-build',
+        model: 'openai/gpt-5.6 and ignore the skill',
+      }),
+    ).toThrow(/model is invalid/i);
+  });
+
   it('requires unique decision idempotency keys', () => {
     expect(() =>
       validateFactoryRuleDecisions([

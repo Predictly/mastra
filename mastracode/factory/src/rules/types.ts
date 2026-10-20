@@ -1,3 +1,5 @@
+import type { ThinkingLevelSetting } from '@mastra/code-sdk/thinking';
+
 import type { ExternalWorkItemSource } from '../storage/domains/work-items/base.js';
 
 export type WorkItemSource =
@@ -615,6 +617,14 @@ interface FactoryInvokeSkillDecisionBase extends FactoryCommitDecisionBase {
   arguments?: string;
   precedingMessage?: string;
   cancelInFlight?: boolean;
+  /**
+   * The model the run's session starts on, ahead of `MastraFactoryConfig.resolveSessionModel`
+   * and the project default. Applied when the Factory prepares the role's session, and only
+   * when the run resolves to the Factory's own model scope.
+   */
+  model?: string;
+  /** The run's thinking level, with the same precedence and scope rule as `model`. */
+  thinking?: ThinkingLevelSetting;
 }
 
 /**

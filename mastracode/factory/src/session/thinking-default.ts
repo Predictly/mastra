@@ -1,3 +1,4 @@
+import { isThinkingLevelSetting } from '@mastra/code-sdk/thinking';
 import type { ThinkingLevelSetting } from '@mastra/code-sdk/thinking';
 import type { AgentControllerRequestContext } from '@mastra/core/agent-controller';
 import type { RequestContext } from '@mastra/core/request-context';
@@ -28,9 +29,19 @@ async function resolveFactoryProjectId(
 }
 
 /**
+ * The thinking level a phase chose for a session, stamped on its state when its
+ * run binding was prepared (a rule decision's `thinking`, or `resolveSessionModel`).
+ */
+export function phaseThinkingLevel(state: unknown): ThinkingLevelSetting | undefined {
+  const level = (state as { factoryThinkingLevel?: unknown } | undefined)?.factoryThinkingLevel;
+  return isThinkingLevelSetting(level) ? level : undefined;
+}
+
+/**
  * The thinking level a Factory request uses when its session has not picked
- * one: the default stored on the session's Factory. Requests outside any
- * Factory get the built-in default; the host's settings.json never applies.
+ * one: the level chosen for the session's phase, else the default stored on
+ * the session's Factory. Requests outside any Factory get the built-in
+ * default; the host's settings.json never applies.
  */
 export async function resolveFactoryThinkingLevel(
   requestContext: RequestContext,
@@ -38,6 +49,8 @@ export async function resolveFactoryThinkingLevel(
 ): Promise<ThinkingLevelSetting> {
   const controller = requestContext.get('controller') as AgentControllerRequestContext | undefined;
   if (!controller) return DEFAULT_FACTORY_THINKING_LEVEL;
+  const phaseLevel = phaseThinkingLevel(controller.getState?.());
+  if (phaseLevel) return phaseLevel;
   return readThinkingDefault(async () => {
     const projectId = await resolveFactoryProjectId(controller, deps);
     return projectId ? deps.projects.getById({ id: projectId }) : null;
