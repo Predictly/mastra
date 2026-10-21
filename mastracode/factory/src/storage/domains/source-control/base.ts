@@ -17,6 +17,25 @@ const SESSION_REPOSITORIES = 'source_control_session_repositories';
  * factory's ownership, left by the factory migration. It is never reused and
  * cannot be replaced while it holds the branch.
  */
+/**
+ * The user already holds this branch in a session of the same factory on
+ * another repository link, so the insert hit the factory-wide unique index.
+ * Reuse is keyed by the link, so that session is not this one to reuse.
+ */
+export class SessionBranchHeldError extends Error {
+  readonly branch: string;
+  readonly sessionId: string;
+  constructor(branch: string, sessionId: string) {
+    super(
+      `Branch ${branch} is already held by session ${sessionId} on another repository of this factory. ` +
+        'Session branches are unique per user across a factory: name the branch per card, or delete that session.',
+    );
+    this.branch = branch;
+    this.sessionId = sessionId;
+    this.name = 'SessionBranchHeldError';
+  }
+}
+
 export class SessionOwnershipMismatchError extends Error {
   constructor(readonly sessionId: string) {
     super(`Session ${sessionId} already holds this branch but does not belong to this factory.`);
@@ -1579,8 +1598,16 @@ export class SourceControlStorage extends FactoryStorageDomain {
           } catch (error) {
             if (!(error instanceof UniqueViolationError)) throw error;
             const row = await findExisting();
-            if (!row) throw error;
-            return reuse(row);
+            if (row) return reuse(row);
+            // Not this link's row: the same user holds the branch on another link
+            // of the factory, which only the factory-wide index can see.
+            const held = await db().findOne<SessionDbRow>(SESSIONS, {
+              factory_project_id: factoryProjectId,
+              user_id: input.userId,
+              branch: input.branch,
+            });
+            if (held) throw new SessionBranchHeldError(input.branch, held.session_id);
+            throw error;
           }
         },
         transferOwner: async ({ sessionId, expectedUserId, toUserId }) => {

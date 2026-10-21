@@ -41,6 +41,7 @@ import { effectiveModelScope } from '../storage/domains/projects/base.js';
 import type { FactoryProjectsStorage } from '../storage/domains/projects/base.js';
 import type { QueueHealthStorage } from '../storage/domains/queue-health/base.js';
 import {
+  SessionBranchHeldError,
   SessionOwnershipMismatchError,
   SourceControlConnectionNotFoundError,
 } from '../storage/domains/source-control/base.js';
@@ -369,6 +370,13 @@ export async function prepareFactoryRuleBinding(
           throw new FactoryDispatchError(
             'source_repository_missing',
             `Repository ${repository.slug} is linked but not in this Factory's environment. Turn it on under Settings → Environment, then retry.`,
+            { cause: error },
+          );
+        }
+        if (error instanceof SessionBranchHeldError) {
+          throw new FactoryDispatchError(
+            'session_unavailable',
+            `${error.message} The run cannot start until branch ${branch} is free for this repository.`,
             { cause: error },
           );
         }
